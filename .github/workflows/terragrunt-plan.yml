@@ -25,7 +25,6 @@ jobs:
   plan:
     name: "Plan - ${{ github.event.inputs.environment || 'dev' }}"
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'dev' }}
 
     defaults:
       run:
@@ -48,8 +47,6 @@ jobs:
           if [ -z "$ARM_TENANT_ID" ]; then echo "ERROR: ARM_TENANT_ID is EMPTY"; else echo "ARM_TENANT_ID is set (length: ${#ARM_TENANT_ID})"; fi
           if [ -z "$ARM_SUBSCRIPTION_ID" ]; then echo "ERROR: ARM_SUBSCRIPTION_ID is EMPTY"; else echo "ARM_SUBSCRIPTION_ID is set (length: ${#ARM_SUBSCRIPTION_ID})"; fi
           echo "ARM_USE_OIDC=$ARM_USE_OIDC"
-          echo "Working directory: $(pwd)"
-          echo "Environment: ${{ github.event.inputs.environment || 'dev' }}"
         working-directory: .
 
       - name: "Setup Terraform"

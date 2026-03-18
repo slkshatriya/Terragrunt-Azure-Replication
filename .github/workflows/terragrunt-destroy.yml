@@ -25,7 +25,6 @@ jobs:
     name: "Destroy - ${{ github.event.inputs.environment }}"
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'DESTROY'
-    environment: ${{ github.event.inputs.environment }}
 
     defaults:
       run:
@@ -38,7 +37,7 @@ jobs:
       ARM_USE_OIDC: "true"
 
     steps:
-      - name: "Checkout"
+      - name: "Checkout Code"
         uses: actions/checkout@v4
 
       - name: "Setup Terraform"
@@ -52,18 +51,8 @@ jobs:
         with:
           terragrunt-version: "0.68.9"
 
-      - name: "Init"
+      - name: "Terragrunt Init"
         run: terragrunt run-all init --terragrunt-non-interactive
 
-      - name: "Destroy"
-        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
-
-  reject:
-    name: "Destroy Rejected"
-    runs-on: ubuntu-latest
-    if: github.event.inputs.confirm != 'DESTROY'
-    steps:
-      - run: |
-          echo "❌ Destroy NOT confirmed. You typed: '${{ github.event.inputs.confirm }}'"
-          echo "You must type exactly 'DESTROY' to proceed."
-          exit 1
+      - name: "Terragrunt Destroy"
+        run: terragrunt run-all destroy --terragrunt-non-interactive

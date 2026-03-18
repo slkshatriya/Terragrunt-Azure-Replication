@@ -1,14 +1,10 @@
 name: "Terragrunt Apply"
 
 on:
-  push:
-    branches: [main]
-    paths: ['modules/**', 'environments/**']
-
   workflow_dispatch:
     inputs:
       environment:
-        description: "Which environment to deploy?"
+        description: "Which environment to apply?"
         required: true
         type: choice
         options:
@@ -20,19 +16,14 @@ permissions:
   id-token: write
   contents: read
 
-concurrency:
-  group: terragrunt-apply-${{ github.event.inputs.environment || 'dev' }}
-  cancel-in-progress: false
-
 jobs:
   apply:
-    name: "Apply - ${{ github.event.inputs.environment || 'dev' }}"
+    name: "Apply - ${{ github.event.inputs.environment }}"
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'dev' }}
 
     defaults:
       run:
-        working-directory: environments/${{ github.event.inputs.environment || 'dev' }}
+        working-directory: environments/${{ github.event.inputs.environment }}
 
     env:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -41,7 +32,7 @@ jobs:
       ARM_USE_OIDC: "true"
 
     steps:
-      - name: "Checkout"
+      - name: "Checkout Code"
         uses: actions/checkout@v4
 
       - name: "Setup Terraform"
@@ -55,14 +46,8 @@ jobs:
         with:
           terragrunt-version: "0.68.9"
 
-      - name: "Init"
+      - name: "Terragrunt Init"
         run: terragrunt run-all init --terragrunt-non-interactive
 
-      - name: "Validate"
-        run: terragrunt run-all validate --terragrunt-non-interactive
-
-      - name: "Plan"
-        run: terragrunt run-all plan --terragrunt-non-interactive
-
-      - name: "Apply"
-        run: terragrunt run-all apply --terragrunt-non-interactive -auto-approve
+      - name: "Terragrunt Apply"
+        run: terragrunt run-all apply --terragrunt-non-interactive
