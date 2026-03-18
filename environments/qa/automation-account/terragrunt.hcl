@@ -24,7 +24,7 @@ dependency "resource_group" {
 
 inputs = {
   automation_account_name = "QA-AutomateProcess"
-  location                = dependency.resource_group.outputs.resource_group_location
+  location                = "westus2"  # Must differ from Dev (eastus) — Azure allows only 1 Automation Account per subscription per region
   resource_group_name     = dependency.resource_group.outputs.resource_group_name
   sku_name                = "Basic"
   identity_type           = "SystemAssigned"
