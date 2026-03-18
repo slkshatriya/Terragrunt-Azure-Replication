@@ -31,7 +31,7 @@ dependency "automation_account" {
 
 inputs = {
   runbook_name            = "Prod-Get-ServicesScript"
-  location                = "centralus"  # Must match automation account region
+  location                = "westus"  # Must match automation account region
   resource_group_name     = dependency.resource_group.outputs.resource_group_name
   automation_account_name = dependency.automation_account.outputs.automation_account_name
   runbook_type            = "PowerShell"
