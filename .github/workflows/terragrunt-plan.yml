@@ -1,0 +1,88 @@
+name: "Terragrunt Plan"
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['modules/**', 'environments/**']
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which environment to plan?"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+
+# OIDC REQUIREMENT: id-token:write allows GitHub to request a token from Azure
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: "Plan - ${{ github.event.inputs.environment || 'dev' }}"
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    defaults:
+      run:
+        working-directory: environments/${{ github.event.inputs.environment || 'dev' }}
+
+    # OIDC: Only 3 env vars needed — NO client secret!
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_USE_OIDC: "true"
+
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - name: "Setup Terragrunt"
+        uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt-version: "0.68.9"
+
+      - name: "Terragrunt Init"
+        run: terragrunt run-all init --terragrunt-non-interactive
+
+      - name: "Terragrunt Validate"
+        run: terragrunt run-all validate --terragrunt-non-interactive
+
+      - name: "Terragrunt Plan"
+        id: plan
+        run: terragrunt run-all plan --terragrunt-non-interactive -no-color 2>&1 | tee plan_output.txt
+        continue-on-error: true
+
+      - name: "Post Plan to PR"
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const env = '${{ github.event.inputs.environment || 'dev' }}';
+            const plan = fs.readFileSync(`environments/${env}/plan_output.txt`, 'utf8');
+            const truncated = plan.length > 60000
+              ? plan.substring(0, 60000) + '\n\n... (truncated)'
+              : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📋 Plan (${env.toUpperCase()}) — OIDC Auth\n\`\`\`\n${truncated}\n\`\`\`\n**Status:** ${{ steps.plan.outcome == 'success' && '✅' || '❌' }}`
+            });
+
+      - name: "Fail if Plan Failed"
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

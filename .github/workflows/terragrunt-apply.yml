@@ -1,0 +1,68 @@
+name: "Terragrunt Apply"
+
+on:
+  push:
+    branches: [main]
+    paths: ['modules/**', 'environments/**']
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which environment to deploy?"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terragrunt-apply-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: "Apply - ${{ github.event.inputs.environment || 'dev' }}"
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    defaults:
+      run:
+        working-directory: environments/${{ github.event.inputs.environment || 'dev' }}
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_USE_OIDC: "true"
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - name: "Setup Terragrunt"
+        uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt-version: "0.68.9"
+
+      - name: "Init"
+        run: terragrunt run-all init --terragrunt-non-interactive
+
+      - name: "Validate"
+        run: terragrunt run-all validate --terragrunt-non-interactive
+
+      - name: "Plan"
+        run: terragrunt run-all plan --terragrunt-non-interactive
+
+      - name: "Apply"
+        run: terragrunt run-all apply --terragrunt-non-interactive -auto-approve
