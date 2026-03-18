@@ -1,11 +1,8 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# ROOT TERRAGRUNT CONFIG — QA
+﻿# ROOT TERRAGRUNT CONFIG - QA
 # Single subscription, OIDC authentication, shared state storage
-# ─────────────────────────────────────────────────────────────────────────────
 
 locals {
-  env_vars    = read_terragrunt_config("${get_terragrunt_dir()}/env.hcl")
-  environment = local.env_vars.locals.environment
+  environment = "qa"
 }
 
 remote_state {

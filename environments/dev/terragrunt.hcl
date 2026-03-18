@@ -1,14 +1,10 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# ROOT TERRAGRUNT CONFIG — DEV
+﻿# ROOT TERRAGRUNT CONFIG - DEV
 # Single subscription, OIDC authentication, shared state storage
-# ─────────────────────────────────────────────────────────────────────────────
 
 locals {
-  env_vars    = read_terragrunt_config("${get_terragrunt_dir()}/env.hcl")
-  environment = local.env_vars.locals.environment
+  environment = "dev"
 }
 
-# All environments share ONE storage account — separated by state key path
 remote_state {
   backend = "azurerm"
   config = {
@@ -26,7 +22,6 @@ remote_state {
   }
 }
 
-# Generate provider with OIDC support
 generate "provider" {
   path      = "provider.tf"
   if_exists = "overwrite_terragrunt"

@@ -39,12 +39,12 @@ inputs = {
   runbook_type            = "PowerShell"
   log_verbose             = false
   log_progress            = false
-  description             = ""
+  description             = null
   tags                    = local.env_vars.locals.tags
 
-  # IMPORTANT: Replace this with the ACTUAL content of your runbook.
-  # Get it from: Azure Portal → Automation Account → Runbooks → Edit
+  # Content matches the ACTUAL runbook in Azure (exact whitespace matters!)
   runbook_content = <<-EOT
-    Get-Service | Select-Object Name, Status, DisplayName
-  EOT
+        $svc = Get-Services
+        Write-Output $svc
+    EOT
 }
