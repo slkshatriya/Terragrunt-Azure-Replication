@@ -16,7 +16,6 @@ on:
           - qa
           - prod
 
-# OIDC REQUIREMENT: id-token:write allows GitHub to request a token from Azure
 permissions:
   id-token: write
   contents: read
@@ -32,7 +31,6 @@ jobs:
       run:
         working-directory: environments/${{ github.event.inputs.environment || 'dev' }}
 
-    # OIDC: Only 3 env vars needed — NO client secret!
     env:
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -42,6 +40,17 @@ jobs:
     steps:
       - name: "Checkout Code"
         uses: actions/checkout@v4
+
+      - name: "Debug - Check secrets are set"
+        run: |
+          echo "=== OIDC Debug ==="
+          if [ -z "$ARM_CLIENT_ID" ]; then echo "ERROR: ARM_CLIENT_ID is EMPTY"; else echo "ARM_CLIENT_ID is set (length: ${#ARM_CLIENT_ID})"; fi
+          if [ -z "$ARM_TENANT_ID" ]; then echo "ERROR: ARM_TENANT_ID is EMPTY"; else echo "ARM_TENANT_ID is set (length: ${#ARM_TENANT_ID})"; fi
+          if [ -z "$ARM_SUBSCRIPTION_ID" ]; then echo "ERROR: ARM_SUBSCRIPTION_ID is EMPTY"; else echo "ARM_SUBSCRIPTION_ID is set (length: ${#ARM_SUBSCRIPTION_ID})"; fi
+          echo "ARM_USE_OIDC=$ARM_USE_OIDC"
+          echo "Working directory: $(pwd)"
+          echo "Environment: ${{ github.event.inputs.environment || 'dev' }}"
+        working-directory: .
 
       - name: "Setup Terraform"
         uses: hashicorp/setup-terraform@v3
@@ -80,7 +89,7 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## 📋 Plan (${env.toUpperCase()}) — OIDC Auth\n\`\`\`\n${truncated}\n\`\`\`\n**Status:** ${{ steps.plan.outcome == 'success' && '✅' || '❌' }}`
+              body: `## Plan (${env.toUpperCase()}) - OIDC Auth\n` + '```\n' + truncated + '\n```\n' + `**Status:** ${{ steps.plan.outcome }}`
             });
 
       - name: "Fail if Plan Failed"
