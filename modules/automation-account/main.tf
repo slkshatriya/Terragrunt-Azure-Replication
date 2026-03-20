@@ -1,4 +1,4 @@
-terraform {
+﻿terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
@@ -7,6 +7,10 @@ terraform {
   }
 }
 
+# WARNING: Azure soft-deletes Automation Accounts for 30 days after deletion.
+# During that 30-day period, the region is BLOCKED for new Automation Accounts
+# on the same subscription. The destroy workflow excludes this resource by default.
+# Only use "YES - Destroy Everything" option if you understand this limitation.
 resource "azurerm_automation_account" "this" {
   name                = var.automation_account_name
   location            = var.location
