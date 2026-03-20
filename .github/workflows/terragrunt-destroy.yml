@@ -62,23 +62,25 @@ jobs:
       - name: "Terragrunt Init"
         run: terragrunt run-all init --terragrunt-non-interactive
 
-      # Step 1: Destroy safe resources (resource-group, managed-identity, logic-app)
-      # These can be freely destroyed and recreated without issues
-      - name: "Destroy Safe Resources (excludes Automation Account & Runbook)"
+      # SAFE DESTROY: Only destroy managed-identity and logic-app
+      # We must ALSO exclude resource-group because Azure cannot delete an RG
+      # that still contains resources (automation-account & runbook are kept alive)
+      - name: "Destroy Safe Resources (keeps Automation Account, Runbook & Resource Group)"
         if: contains(github.event.inputs.include_automation, 'NO')
         run: |
           terragrunt run-all destroy \
             --terragrunt-non-interactive \
             --terragrunt-exclude-dir automation-account \
-            --terragrunt-exclude-dir runbook
+            --terragrunt-exclude-dir runbook \
+            --terragrunt-exclude-dir resource-group
 
-      # Step 2: Full destroy (includes automation account) - USE WITH CAUTION
-      # Azure soft-deletes Automation Accounts for 30 days, blocking that region
+      # FULL DESTROY: Destroys everything including automation account
+      # WARNING: Azure soft-deletes Automation Accounts for 30 days, blocking that region
       - name: "FULL Destroy (including Automation Account - region will be blocked for 30 days!)"
         if: contains(github.event.inputs.include_automation, 'YES')
         run: |
-          echo "  WARNING: Destroying Automation Account will soft-delete it for 30 days."
-          echo "  The region used by this account will be BLOCKED for new Automation Accounts."
-          echo "  You will need to change the region in config before re-applying."
+          echo "WARNING: Destroying Automation Account will soft-delete it for 30 days."
+          echo "The region used by this account will be BLOCKED for new Automation Accounts."
+          echo "You will need to change the region in config before re-applying."
           echo ""
           terragrunt run-all destroy --terragrunt-non-interactive
