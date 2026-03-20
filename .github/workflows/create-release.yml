@@ -1,0 +1,108 @@
+﻿name: "Create Release"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g., v1.0.0, v1.1.0, v2.0.0)"
+        required: true
+        type: string
+      release_notes:
+        description: "Release notes (what changed in this version)"
+        required: true
+        type: string
+      prerelease:
+        description: "Is this a pre-release?"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: "Release ${{ github.event.inputs.version }}"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Validate Version Format"
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "ERROR: Version must follow semantic versioning: vMAJOR.MINOR.PATCH (e.g., v1.0.0, v1.1.0-rc1)"
+            exit 1
+          fi
+          echo "Version format valid: $VERSION"
+
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Check Tag Doesn't Already Exist"
+        run: |
+          if git rev-parse "${{ github.event.inputs.version }}" >/dev/null 2>&1; then
+            echo "ERROR: Tag ${{ github.event.inputs.version }} already exists!"
+            exit 1
+          fi
+          echo "Tag ${{ github.event.inputs.version }} is available."
+
+      - name: "List Module Changes Since Last Tag"
+        id: changes
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "Last tag: ${LAST_TAG:-none}"
+          echo ""
+          if [ -n "$LAST_TAG" ]; then
+            echo "## Changes since $LAST_TAG:"
+            echo "### Modules:"
+            git diff --name-only "$LAST_TAG"..HEAD -- modules/ || echo "No module changes"
+            echo ""
+            echo "### Environments:"
+            git diff --name-only "$LAST_TAG"..HEAD -- environments/ || echo "No environment changes"
+            echo ""
+            echo "### Workflows:"
+            git diff --name-only "$LAST_TAG"..HEAD -- .github/ || echo "No workflow changes"
+          else
+            echo "First release - all files are new"
+            git ls-files modules/ | head -20
+          fi
+
+      - name: "Create Git Tag"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ github.event.inputs.version }}" -m "Release ${{ github.event.inputs.version }}: ${{ github.event.inputs.release_notes }}"
+          git push origin "${{ github.event.inputs.version }}"
+
+      - name: "Create GitHub Release"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: release } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ github.event.inputs.version }}',
+              name: 'Release ${{ github.event.inputs.version }}',
+              body: `## Release ${{ github.event.inputs.version }}\n\n${{ github.event.inputs.release_notes }}\n\n### Module Versions\nAll modules in \`modules/\` are tagged at this version.\n\n### Usage\nUpdate \`version.hcl\` in your environment:\n\`\`\`hcl\nlocals {\n  module_version = "${{ github.event.inputs.version }}"\n}\n\`\`\`\n\n### Promotion Path\n1. Dev uses \`local\` (latest code)\n2. Test in QA: update \`environments/qa/version.hcl\`\n3. Promote to Prod: update \`environments/prod/version.hcl\``,
+              draft: false,
+              prerelease: ${{ github.event.inputs.prerelease }}
+            });
+            console.log(`Release created: ${release.html_url}`);
+
+      - name: "Summary"
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ github.event.inputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pre-release | ${{ github.event.inputs.prerelease }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Notes | ${{ github.event.inputs.release_notes }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Update \`environments/qa/version.hcl\` to \`${{ github.event.inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run Plan for QA to verify" >> $GITHUB_STEP_SUMMARY
+          echo "3. Apply QA" >> $GITHUB_STEP_SUMMARY
+          echo "4. After QA validation, update \`environments/prod/version.hcl\`" >> $GITHUB_STEP_SUMMARY

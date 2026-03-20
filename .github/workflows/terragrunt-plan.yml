@@ -39,6 +39,13 @@ jobs:
     steps:
       - name: "Checkout Code"
         uses: actions/checkout@v4
+      - name: "Display Module Version"
+        run: |
+          echo "=== Module Version for ${{ github.event.inputs.environment || 'dev' }} ==="
+          cat version.hcl
+          echo ""
+        working-directory: environments/${{ github.event.inputs.environment || 'dev' }}
+
 
       - name: "Debug - Check secrets are set"
         run: |

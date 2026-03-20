@@ -1,4 +1,4 @@
-﻿name: "Terragrunt Destroy"
+name: "Terragrunt Destroy"
 
 on:
   workflow_dispatch:
@@ -47,6 +47,12 @@ jobs:
     steps:
       - name: "Checkout Code"
         uses: actions/checkout@v4
+      - name: "Display Module Version"
+        run: |
+          echo "=== Module Version for ${{ github.event.inputs.environment }} ==="
+          cat version.hcl
+          echo ""
+
 
       - name: "Setup Terraform"
         uses: hashicorp/setup-terraform@v3
