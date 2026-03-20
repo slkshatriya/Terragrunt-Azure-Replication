@@ -1,0 +1,2158 @@
+╔══════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                      ║
+║   TERRAGRUNT + AZURE: COMPLETE IMPLEMENTATION GUIDE                                  ║
+║   Replicating Existing Resources from Dev → QA → Prod                                ║
+║                                                                                      ║
+║   Part 1: Single Subscription (Different Resource Groups per Environment)            ║
+║   Part 2: Multiple Subscriptions (Separate Subscription per Environment)             ║
+║                                                                                      ║
+║   Authentication: OIDC (OpenID Connect) — No Passwords/Secrets Needed                ║
+║   CI/CD: GitHub Actions                                                              ║
+║   Written: March 2026                                                                ║
+║                                                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════════════╝
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+                    TABLE OF CONTENTS
+════════════════════════════════════════════════════════════════════════════════════════
+
+  PART 1: SINGLE SUBSCRIPTION SETUP
+  ──────────────────────────────────
+  1.1  What Are We Building? (Big Picture)
+  1.2  Prerequisites (What You Need Before Starting)
+  1.3  Understanding the Folder Structure
+  1.4  Step 1: Create an Azure AD App Registration for OIDC
+  1.5  Step 2: Create a State Storage Account in Azure
+  1.6  Step 3: Create the Project Folder Structure
+  1.7  Step 4: Create the Terraform Modules (Reusable Templates)
+  1.8  Step 5: Create the Root Terragrunt Config (Per Environment)
+  1.9  Step 6: Create the Environment Variable Files (env.hcl)
+  1.10 Step 7: Create the Resource Configs (Per Environment)
+  1.11 Step 8: Create the GitHub Actions Pipelines
+  1.12 Step 9: Create the GitHub Repository and Push Code
+  1.13 Step 10: Set Up OIDC Federated Credentials in Azure
+  1.14 Step 11: Set GitHub Secrets
+  1.15 Step 12: Import Existing Dev Resources into Terraform State
+  1.16 Step 13: Deploy QA and Prod via GitHub Actions
+  1.17 Common Errors and How to Fix Them
+  1.18 Final Result Summary
+
+  PART 2: MULTIPLE SUBSCRIPTIONS SETUP
+  ─────────────────────────────────────
+  2.1  What Changes with Multiple Subscriptions?
+  2.2  Prerequisites for Multi-Subscription
+  2.3  Azure Setup Differences
+  2.4  Folder Structure Differences
+  2.5  Root Terragrunt Config Changes
+  2.6  Environment Variable File Changes
+  2.7  GitHub Secrets Changes
+  2.8  OIDC Federated Credentials Changes
+  2.9  GitHub Actions Workflow Changes
+  2.10 Complete Multi-Subscription Example
+  2.11 State Storage Options for Multi-Subscription
+  2.12 Common Errors Specific to Multi-Subscription
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════
+                                                                                    
+     PPPP   AAAA  RRRR  TTTTT      1                                               
+     P   P A    A R   R   T       11                                               
+     PPPP  AAAAAA RRRR    T        1                                               
+     P     A    A R  R    T        1                                               
+     P     A    A R   R   T      11111                                             
+                                                                                    
+     SINGLE SUBSCRIPTION SETUP                                                      
+     (All environments in ONE Azure subscription,                                   
+      separated by Resource Group names)                                            
+                                                                                    
+════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.1  WHAT ARE WE BUILDING? (BIG PICTURE)
+────────────────────────────────────────────────────────────────────────────────────────
+
+SCENARIO:
+  You already have some Azure resources running in Dev (created manually via Azure 
+  Portal or some other way). Now you want to:
+  
+  1. Bring those existing Dev resources under Terraform/Terragrunt control
+  2. Create exact copies in QA and Prod automatically
+  3. Set up a CI/CD pipeline so future changes go through GitHub → Azure automatically
+  4. Use OIDC authentication (no passwords stored anywhere!)
+
+WHAT WE HAD (EXISTING DEV RESOURCES):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  Resource Group: MyResources-Dev (eastus)                      │
+  │  ├── Automation Account: AutomateProcess (SystemAssigned)      │
+  │  │   └── Runbook: Get-ServicesScript (PowerShell)              │
+  │  ├── Logic App: DevLA                                          │
+  │  └── Managed Identity: Dev-MI (User-Assigned)                  │
+  └─────────────────────────────────────────────────────────────────┘
+
+WHAT WE CREATED (QA + PROD):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  Resource Group: MyResources-QA (eastus)                       │
+  │  ├── Automation Account: QA-AutomateProcess (eastus2*)         │
+  │  │   └── Runbook: QA-Get-ServicesScript (eastus2*)             │
+  │  ├── Logic App: QA-LA                                          │
+  │  └── Managed Identity: QA-MI                                   │
+  └─────────────────────────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  Resource Group: MyResources-Prod (eastus)                     │
+  │  ├── Automation Account: Prod-AutomateProcess (westus*)        │
+  │  │   └── Runbook: Prod-Get-ServicesScript (westus*)            │
+  │  ├── Logic App: Prod-LA                                        │
+  │  └── Managed Identity: Prod-MI                                 │
+  └─────────────────────────────────────────────────────────────────┘
+  
+  * IMPORTANT: Azure only allows ONE Automation Account per subscription per region.
+    Since Dev uses "eastus", QA must use "eastus2" and Prod must use "westus"
+    (or any other DIFFERENT allowed region).
+
+HOW IT WORKS (SIMPLE EXPLANATION):
+  
+  Think of it like a cookie cutter:
+  - "Modules" are the cookie cutter shapes (templates)
+  - "Environments" are different batches of cookies (dev/qa/prod)
+  - Each batch uses the SAME cutter but with different sprinkles (names, tags)
+  - "Terragrunt" is the baker that manages everything efficiently
+  - "GitHub Actions" is the automated oven — push code, resources appear!
+  - "OIDC" is the security badge — GitHub proves who it is to Azure, no passwords needed
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.2  PREREQUISITES (WHAT YOU NEED BEFORE STARTING)
+────────────────────────────────────────────────────────────────────────────────────────
+
+INSTALL THESE ON YOUR COMPUTER:
+
+  1. Terraform (v1.7.0 or higher)
+     ✦ Download: https://developer.hashicorp.com/terraform/downloads
+     ✦ Verify:   terraform --version
+
+  2. Terragrunt (v0.68.0 or higher)
+     ✦ Download: https://terragrunt.gruntwork.io/docs/getting-started/install/
+     ✦ Verify:   terragrunt --version
+
+  3. Azure CLI
+     ✦ Download: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli
+     ✦ Verify:   az --version
+     ✦ Login:    az login
+
+  4. Git
+     ✦ Download: https://git-scm.com/downloads
+     ✦ Verify:   git --version
+
+  5. GitHub CLI (gh) — Optional but very helpful
+     ✦ Download: https://cli.github.com/
+     ✦ Verify:   gh --version
+     ✦ Login:    gh auth login
+
+ACCOUNTS YOU NEED:
+  ✦ Azure Subscription (note down your Subscription ID and Tenant ID)
+  ✦ GitHub Account
+
+HOW TO FIND YOUR AZURE IDs:
+  Run:  az account show --query "{subscriptionId:id, tenantId:tenantId}" -o table
+  
+  Example output:
+    SubscriptionId                        TenantId
+    ------------------------------------  ------------------------------------
+    9c92613c-8071-4109-b321-0af937fb90aa  3ddc61ec-bae8-4a26-9d43-0b1b1c5323e4
+
+  *** WRITE THESE DOWN — You'll need them multiple times! ***
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.3  UNDERSTANDING THE FOLDER STRUCTURE
+────────────────────────────────────────────────────────────────────────────────────────
+
+This is the complete folder structure we'll create:
+
+  Terragrunt-Azure-Replication/
+  │
+  ├── modules/                              ← REUSABLE TEMPLATES (shared by all envs)
+  │   ├── resource-group/
+  │   │   ├── main.tf                       ← The actual resource definition
+  │   │   ├── variables.tf                  ← Input parameters
+  │   │   └── outputs.tf                    ← Values other modules can use
+  │   ├── managed-identity/
+  │   │   ├── main.tf
+  │   │   ├── variables.tf
+  │   │   └── outputs.tf
+  │   ├── automation-account/
+  │   │   ├── main.tf
+  │   │   ├── variables.tf
+  │   │   └── outputs.tf
+  │   ├── runbook/
+  │   │   ├── main.tf
+  │   │   ├── variables.tf
+  │   │   └── outputs.tf
+  │   └── logic-app/
+  │       ├── main.tf
+  │       ├── variables.tf
+  │       └── outputs.tf
+  │
+  ├── environments/                         ← ENVIRONMENT-SPECIFIC CONFIGS
+  │   ├── dev/
+  │   │   ├── terragrunt.hcl                ← Root config (backend, provider)
+  │   │   ├── env.hcl                       ← Shared variables for dev
+  │   │   ├── resource-group/
+  │   │   │   └── terragrunt.hcl            ← Dev resource group config
+  │   │   ├── managed-identity/
+  │   │   │   └── terragrunt.hcl
+  │   │   ├── automation-account/
+  │   │   │   └── terragrunt.hcl
+  │   │   ├── runbook/
+  │   │   │   └── terragrunt.hcl
+  │   │   └── logic-app/
+  │   │       └── terragrunt.hcl
+  │   ├── qa/                               ← Same structure as dev
+  │   │   ├── terragrunt.hcl
+  │   │   ├── env.hcl
+  │   │   ├── resource-group/
+  │   │   │   └── terragrunt.hcl
+  │   │   ├── managed-identity/
+  │   │   │   └── terragrunt.hcl
+  │   │   ├── automation-account/
+  │   │   │   └── terragrunt.hcl
+  │   │   ├── runbook/
+  │   │   │   └── terragrunt.hcl
+  │   │   └── logic-app/
+  │   │       └── terragrunt.hcl
+  │   └── prod/                             ← Same structure as dev
+  │       ├── terragrunt.hcl
+  │       ├── env.hcl
+  │       ├── resource-group/
+  │       │   └── terragrunt.hcl
+  │       ├── managed-identity/
+  │       │   └── terragrunt.hcl
+  │       ├── automation-account/
+  │       │   └── terragrunt.hcl
+  │       ├── runbook/
+  │       │   └── terragrunt.hcl
+  │       └── logic-app/
+  │           └── terragrunt.hcl
+  │
+  ├── .github/
+  │   └── workflows/                        ← CI/CD PIPELINES
+  │       ├── terragrunt-plan.yml           ← Preview changes
+  │       ├── terragrunt-apply.yml          ← Apply changes
+  │       └── terragrunt-destroy.yml        ← Tear down (safety: requires typing DESTROY)
+  │
+  └── .gitignore                            ← Files Git should ignore
+
+WHY THIS STRUCTURE?
+  ✦ modules/ = Write ONCE, use EVERYWHERE (DRY principle)
+  ✦ environments/ = Each env has its own state, its own variables, its own names
+  ✦ Each resource in each environment has its own terragrunt.hcl = controls WHAT to create
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.4  STEP 1: CREATE AN AZURE AD APP REGISTRATION FOR OIDC
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT IS OIDC?
+  Instead of storing an Azure password/secret in GitHub, OIDC lets GitHub say 
+  "Hey Azure, I'm GitHub Actions running for repo X" and Azure says "I trust that 
+  repo, here's a temporary token." No passwords anywhere!
+
+RUN THESE COMMANDS:
+
+  # Step 1a: Create an App Registration
+  az ad app create --display-name "github-actions-terragrunt"
+  
+  # Note down the "appId" from the output. Example: 9263e020-1d2e-44d5-a482-9e3e88977864
+  # This is your CLIENT_ID — you'll need it everywhere!
+
+  # Step 1b: Create a Service Principal for the app
+  az ad sp create --id <YOUR_APP_ID>
+  
+  # Step 1c: Give it "Contributor" role on your subscription
+  az role assignment create \
+    --assignee <YOUR_APP_ID> \
+    --role "Contributor" \
+    --scope "/subscriptions/<YOUR_SUBSCRIPTION_ID>"
+
+VERIFY IT WORKED:
+  az role assignment list --assignee <YOUR_APP_ID> --query "[].{role:roleDefinitionName, scope:scope}" -o table
+
+  Expected output:
+    Role         Scope
+    -----------  ---------------------------------------------------
+    Contributor  /subscriptions/9c92613c-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+  *** SAVE YOUR APP_ID (CLIENT_ID) — You'll need it in Steps 10, 11, and 14! ***
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.5  STEP 2: CREATE A STATE STORAGE ACCOUNT IN AZURE
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT IS STATE STORAGE?
+  Terraform keeps track of what it has created in a "state file." This file MUST be 
+  stored somewhere safe and shared (not on your laptop). We use an Azure Storage Account.
+
+RUN THESE COMMANDS:
+
+  # Step 2a: Create a Resource Group for state storage
+  az group create --name terraform-state-rg --location eastus
+
+  # Step 2b: Create a Storage Account (name must be globally unique, lowercase, no dashes)
+  az storage account create \
+    --name tfstatereplication26 \
+    --resource-group terraform-state-rg \
+    --location eastus \
+    --sku Standard_LRS
+
+  # Step 2c: Create a Blob Container inside it
+  az storage container create \
+    --name tfstate \
+    --account-name tfstatereplication26
+
+  # Step 2d: Give the Service Principal access to this storage
+  # (Get the storage account resource ID first)
+  STORAGE_ID=$(az storage account show --name tfstatereplication26 --resource-group terraform-state-rg --query id -o tsv)
+  
+  az role assignment create \
+    --assignee <YOUR_APP_ID> \
+    --role "Storage Blob Data Contributor" \
+    --scope $STORAGE_ID
+
+  *** NOTE: Replace "tfstatereplication26" with YOUR unique name ***
+  *** The name must be 3-24 characters, lowercase letters and numbers only ***
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.6  STEP 3: CREATE THE PROJECT FOLDER STRUCTURE
+────────────────────────────────────────────────────────────────────────────────────────
+
+RUN THESE COMMANDS (PowerShell):
+
+  # Create the project root
+  mkdir Terragrunt-Azure-Replication
+  cd Terragrunt-Azure-Replication
+
+  # Create modules folders
+  mkdir -p modules/resource-group
+  mkdir -p modules/managed-identity
+  mkdir -p modules/automation-account
+  mkdir -p modules/runbook
+  mkdir -p modules/logic-app
+
+  # Create environment folders (repeat for each resource in each env)
+  foreach ($env in @("dev", "qa", "prod")) {
+    mkdir -p "environments/$env/resource-group"
+    mkdir -p "environments/$env/managed-identity"
+    mkdir -p "environments/$env/automation-account"
+    mkdir -p "environments/$env/runbook"
+    mkdir -p "environments/$env/logic-app"
+  }
+
+  # Create GitHub Actions folder
+  mkdir -p .github/workflows
+
+  # Initialize Git
+  git init
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.7  STEP 4: CREATE THE TERRAFORM MODULES (REUSABLE TEMPLATES)
+────────────────────────────────────────────────────────────────────────────────────────
+
+Each module has 3 files:
+  - main.tf       → The actual Azure resource definition
+  - variables.tf  → Input parameters (what the caller provides)
+  - outputs.tf    → Values that other modules can reference
+
+
+MODULE 1: RESOURCE GROUP
+─────────────────────────
+
+FILE: modules/resource-group/main.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  terraform {                                                     │
+│    required_providers {                                           │
+│      azurerm = {                                                 │
+│        source  = "hashicorp/azurerm"                             │
+│        version = "~> 3.0"                                        │
+│      }                                                           │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  resource "azurerm_resource_group" "this" {                      │
+│    name     = var.resource_group_name                            │
+│    location = var.location                                       │
+│    tags     = var.tags                                           │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/resource-group/variables.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  variable "resource_group_name" {                                │
+│    description = "Name of the resource group"                    │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "location" {                                           │
+│    description = "Azure region (e.g., eastus)"                   │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "tags" {                                               │
+│    description = "Tags to apply to the resource group"           │
+│    type        = map(string)                                     │
+│    default     = {}                                              │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/resource-group/outputs.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  output "resource_group_name" {                                  │
+│    description = "Name of the resource group"                    │
+│    value       = azurerm_resource_group.this.name                │
+│  }                                                               │
+│                                                                  │
+│  output "resource_group_location" {                              │
+│    description = "Location of the resource group"                │
+│    value       = azurerm_resource_group.this.location            │
+│  }                                                               │
+│                                                                  │
+│  output "resource_group_id" {                                    │
+│    description = "ID of the resource group"                      │
+│    value       = azurerm_resource_group.this.id                  │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+MODULE 2: MANAGED IDENTITY
+───────────────────────────
+
+FILE: modules/managed-identity/main.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  terraform {                                                     │
+│    required_providers {                                           │
+│      azurerm = {                                                 │
+│        source  = "hashicorp/azurerm"                             │
+│        version = "~> 3.0"                                        │
+│      }                                                           │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  resource "azurerm_user_assigned_identity" "this" {              │
+│    name                = var.managed_identity_name               │
+│    location            = var.location                            │
+│    resource_group_name = var.resource_group_name                 │
+│    tags                = var.tags                                │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/managed-identity/variables.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  variable "managed_identity_name" {                              │
+│    description = "Name of the User-Assigned Managed Identity"    │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "location" {                                           │
+│    description = "Azure region"                                  │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "resource_group_name" {                                │
+│    description = "Resource group to create the identity in"      │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "tags" {                                               │
+│    description = "Tags to apply"                                 │
+│    type        = map(string)                                     │
+│    default     = {}                                              │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/managed-identity/outputs.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  output "managed_identity_id" {                                  │
+│    description = "ID of the Managed Identity"                    │
+│    value       = azurerm_user_assigned_identity.this.id          │
+│  }                                                               │
+│                                                                  │
+│  output "managed_identity_name" {                                │
+│    description = "Name of the Managed Identity"                  │
+│    value       = azurerm_user_assigned_identity.this.name        │
+│  }                                                               │
+│                                                                  │
+│  output "managed_identity_principal_id" {                        │
+│    description = "Principal ID of the Managed Identity"          │
+│    value       = azurerm_user_assigned_identity.this.principal_id│
+│  }                                                               │
+│                                                                  │
+│  output "managed_identity_client_id" {                           │
+│    description = "Client ID of the Managed Identity"             │
+│    value       = azurerm_user_assigned_identity.this.client_id   │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+MODULE 3: AUTOMATION ACCOUNT
+─────────────────────────────
+
+FILE: modules/automation-account/main.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  terraform {                                                     │
+│    required_providers {                                           │
+│      azurerm = {                                                 │
+│        source  = "hashicorp/azurerm"                             │
+│        version = "~> 3.0"                                        │
+│      }                                                           │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  resource "azurerm_automation_account" "this" {                  │
+│    name                = var.automation_account_name              │
+│    location            = var.location                            │
+│    resource_group_name = var.resource_group_name                 │
+│    sku_name            = var.sku_name                            │
+│    tags                = var.tags                                │
+│                                                                  │
+│    dynamic "identity" {                                          │
+│      for_each = var.identity_type != null ? [1] : []             │
+│      content {                                                   │
+│        type = var.identity_type                                  │
+│      }                                                           │
+│    }                                                             │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+  NOTE: The "dynamic identity" block means:
+    - If identity_type = "SystemAssigned" → creates the identity block
+    - If identity_type = null → no identity block (skips it)
+    This makes the module flexible for different use cases.
+
+FILE: modules/automation-account/variables.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  variable "automation_account_name" {                            │
+│    description = "Name of the Automation Account"                │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "location" {                                           │
+│    description = "Azure region"                                  │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "resource_group_name" {                                │
+│    description = "Resource group name"                           │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "sku_name" {                                           │
+│    description = "SKU: Basic or Free"                            │
+│    type        = string                                          │
+│    default     = "Basic"                                         │
+│  }                                                               │
+│                                                                  │
+│  variable "identity_type" {                                      │
+│    description = "SystemAssigned, UserAssigned, or null"         │
+│    type        = string                                          │
+│    default     = null                                            │
+│  }                                                               │
+│                                                                  │
+│  variable "tags" {                                               │
+│    description = "Tags to apply"                                 │
+│    type        = map(string)                                     │
+│    default     = {}                                              │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/automation-account/outputs.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  output "automation_account_id" {                                │
+│    description = "ID of the Automation Account"                  │
+│    value       = azurerm_automation_account.this.id              │
+│  }                                                               │
+│                                                                  │
+│  output "automation_account_name" {                              │
+│    description = "Name of the Automation Account"                │
+│    value       = azurerm_automation_account.this.name            │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+MODULE 4: RUNBOOK
+──────────────────
+
+FILE: modules/runbook/main.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  terraform {                                                     │
+│    required_providers {                                           │
+│      azurerm = {                                                 │
+│        source  = "hashicorp/azurerm"                             │
+│        version = "~> 3.0"                                        │
+│      }                                                           │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  resource "azurerm_automation_runbook" "this" {                  │
+│    name                    = var.runbook_name                    │
+│    location                = var.location                        │
+│    resource_group_name     = var.resource_group_name             │
+│    automation_account_name = var.automation_account_name         │
+│    runbook_type            = var.runbook_type                    │
+│    log_verbose             = var.log_verbose                     │
+│    log_progress            = var.log_progress                    │
+│    description             = var.description                     │
+│    content                 = var.runbook_content                 │
+│    tags                    = var.tags                            │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/runbook/variables.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  variable "runbook_name" {                                       │
+│    description = "Name of the Runbook"                           │
+│    type        = string                                          │
+│  }                                                               │
+│                                                                  │
+│  variable "location" {                                           │
+│    type    = string                                              │
+│  }                                                               │
+│                                                                  │
+│  variable "resource_group_name" {                                │
+│    type    = string                                              │
+│  }                                                               │
+│                                                                  │
+│  variable "automation_account_name" {                            │
+│    type    = string                                              │
+│  }                                                               │
+│                                                                  │
+│  variable "runbook_type" {                                       │
+│    type    = string                                              │
+│    default = "PowerShell"                                        │
+│  }                                                               │
+│                                                                  │
+│  variable "log_verbose" {                                        │
+│    type    = bool                                                │
+│    default = false                                               │
+│  }                                                               │
+│                                                                  │
+│  variable "log_progress" {                                       │
+│    type    = bool                                                │
+│    default = false                                               │
+│  }                                                               │
+│                                                                  │
+│  variable "description" {                                        │
+│    type    = string                                              │
+│    default = ""                                                  │
+│  }                                                               │
+│                                                                  │
+│  variable "runbook_content" {                                    │
+│    type    = string                                              │
+│    default = "Write-Output 'Hello from Runbook'"                 │
+│  }                                                               │
+│                                                                  │
+│  variable "tags" {                                               │
+│    type    = map(string)                                         │
+│    default = {}                                                  │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/runbook/outputs.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  output "runbook_id" {                                           │
+│    value = azurerm_automation_runbook.this.id                    │
+│  }                                                               │
+│                                                                  │
+│  output "runbook_name" {                                         │
+│    value = azurerm_automation_runbook.this.name                  │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+MODULE 5: LOGIC APP
+────────────────────
+
+FILE: modules/logic-app/main.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  terraform {                                                     │
+│    required_providers {                                           │
+│      azurerm = {                                                 │
+│        source  = "hashicorp/azurerm"                             │
+│        version = "~> 3.0"                                        │
+│      }                                                           │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  resource "azurerm_logic_app_workflow" "this" {                  │
+│    name                = var.logic_app_name                      │
+│    location            = var.location                            │
+│    resource_group_name = var.resource_group_name                 │
+│    tags                = var.tags                                │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/logic-app/variables.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  variable "logic_app_name" {                                     │
+│    type = string                                                 │
+│  }                                                               │
+│                                                                  │
+│  variable "location" {                                           │
+│    type = string                                                 │
+│  }                                                               │
+│                                                                  │
+│  variable "resource_group_name" {                                │
+│    type = string                                                 │
+│  }                                                               │
+│                                                                  │
+│  variable "tags" {                                               │
+│    type    = map(string)                                         │
+│    default = {}                                                  │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: modules/logic-app/outputs.tf
+┌──────────────────────────────────────────────────────────────────┐
+│  output "logic_app_id" {                                         │
+│    value = azurerm_logic_app_workflow.this.id                    │
+│  }                                                               │
+│                                                                  │
+│  output "logic_app_name" {                                       │
+│    value = azurerm_logic_app_workflow.this.name                  │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.8  STEP 5: CREATE THE ROOT TERRAGRUNT CONFIG (PER ENVIRONMENT)
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT IS THIS?
+  The root terragrunt.hcl in each environment folder tells Terragrunt:
+  - WHERE to store state (Azure Storage Account)
+  - HOW to authenticate (OIDC)
+  - WHICH Azure provider to use
+
+  *** THIS FILE IS THE SAME FOR ALL 3 ENVIRONMENTS ***
+  *** EXCEPT the "environment" local value changes (dev/qa/prod) ***
+
+FILE: environments/dev/terragrunt.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  # ROOT TERRAGRUNT CONFIG - DEV                                 │
+│  # Single subscription, OIDC authentication, shared state       │
+│                                                                  │
+│  locals {                                                        │
+│    environment = "dev"                                           │  ← CHANGE THIS for qa/prod
+│  }                                                               │
+│                                                                  │
+│  remote_state {                                                  │
+│    backend = "azurerm"                                           │
+│    config = {                                                    │
+│      resource_group_name  = "terraform-state-rg"                 │  ← Your state RG
+│      storage_account_name = "tfstatereplication26"               │  ← Your storage account
+│      container_name       = "tfstate"                            │  ← Your container
+│      key = "${local.environment}/${path_relative_to_include()}/  │  ← Auto-generates path!
+│             terraform.tfstate"                                   │
+│      use_oidc        = true                                      │  ← OIDC for state access
+│      client_id       = get_env("ARM_CLIENT_ID", "")             │  ← From GitHub secrets
+│      subscription_id = get_env("ARM_SUBSCRIPTION_ID", "")       │
+│      tenant_id       = get_env("ARM_TENANT_ID", "")             │
+│    }                                                             │
+│    generate = {                                                  │
+│      path      = "backend.tf"                                   │
+│      if_exists = "overwrite_terragrunt"                          │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  generate "provider" {                                           │
+│    path      = "provider.tf"                                     │
+│    if_exists = "overwrite_terragrunt"                            │
+│    contents  = <<EOF                                             │
+│  provider "azurerm" {                                            │
+│    features {}                                                   │
+│    use_oidc = true                                               │
+│  }                                                               │
+│  EOF                                                             │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FOR QA: Copy the same file but change:  environment = "qa"
+FOR PROD: Copy the same file but change: environment = "prod"
+
+HOW THE STATE KEY WORKS (AUTOMATIC PATH GENERATION):
+  When you run from environments/dev/resource-group:
+    key = "dev/resource-group/terraform.tfstate"
+  When you run from environments/qa/logic-app:
+    key = "qa/logic-app/terraform.tfstate"
+  
+  This means each resource in each environment gets its OWN state file!
+  They never conflict with each other.
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.9  STEP 6: CREATE THE ENVIRONMENT VARIABLE FILES (env.hcl)
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT IS THIS?
+  Shared variables for each environment. Instead of repeating "location = eastus" 
+  in every resource config, you put it here ONCE and all resources read from it.
+
+FILE: environments/dev/env.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment = "dev"                                           │
+│    location    = "eastus"                                        │
+│    tags        = {}                 # Dev has no tags (matches   │
+│  }                                  #  existing resources)       │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: environments/qa/env.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment = "qa"                                            │
+│    location    = "eastus"                                        │
+│    tags = {                                                      │
+│      environment = "qa"                                          │
+│      managed_by  = "terragrunt"                                  │
+│    }                                                             │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: environments/prod/env.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment = "prod"                                          │
+│    location    = "eastus"                                        │
+│    tags = {                                                      │
+│      environment = "prod"                                        │
+│      managed_by  = "terragrunt"                                  │
+│      criticality = "high"                                        │
+│    }                                                             │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.10  STEP 7: CREATE THE RESOURCE CONFIGS (PER ENVIRONMENT)
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT IS THIS?
+  Each resource in each environment has its own terragrunt.hcl file that says:
+  - WHICH module to use (source)
+  - WHAT values to pass (inputs)
+  - WHICH other resources it depends on (dependency)
+
+PATTERN (Same for every resource):
+  1. include "root"   → Links to the parent terragrunt.hcl (backend + provider)
+  2. locals           → Reads env.hcl for shared variables
+  3. terraform source → Points to the module folder
+  4. dependency       → Declares what this resource needs (e.g., runbook needs automation account)
+  5. inputs           → The actual values (names, locations, tags)
+
+
+DEV RESOURCE GROUP CONFIG:
+
+FILE: environments/dev/resource-group/terragrunt.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  include "root" {                                                │
+│    path = find_in_parent_folders()                               │  ← Finds environments/dev/terragrunt.hcl
+│  }                                                               │
+│                                                                  │
+│  locals {                                                        │
+│    env_vars = read_terragrunt_config(                            │
+│      find_in_parent_folders("env.hcl")                           │  ← Reads environments/dev/env.hcl
+│    )                                                             │
+│  }                                                               │
+│                                                                  │
+│  terraform {                                                     │
+│    source = "../../../modules/resource-group"                    │  ← Points to the module
+│  }                                                               │
+│                                                                  │
+│  inputs = {                                                      │
+│    resource_group_name = "MyResources-Dev"                       │  ← MUST match existing name!
+│    location            = local.env_vars.locals.location          │  ← "eastus" from env.hcl
+│    tags                = local.env_vars.locals.tags              │  ← {} from env.hcl
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+DEV AUTOMATION ACCOUNT CONFIG (shows dependency pattern):
+
+FILE: environments/dev/automation-account/terragrunt.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  include "root" {                                                │
+│    path = find_in_parent_folders()                               │
+│  }                                                               │
+│                                                                  │
+│  locals {                                                        │
+│    env_vars = read_terragrunt_config(                            │
+│      find_in_parent_folders("env.hcl")                           │
+│    )                                                             │
+│  }                                                               │
+│                                                                  │
+│  terraform {                                                     │
+│    source = "../../../modules/automation-account"                │
+│  }                                                               │
+│                                                                  │
+│  dependency "resource_group" {                   ← DEPENDENCY!   │
+│    config_path = "../resource-group"             ← Where to find │
+│    mock_outputs = {                              ← Fake values   │
+│      resource_group_name     = "mock-rg"         │  for plan     │
+│      resource_group_location = "eastus"          │  (before RG   │
+│    }                                             │  exists)      │
+│  }                                                               │
+│                                                                  │
+│  inputs = {                                                      │
+│    automation_account_name = "AutomateProcess"                   │
+│    location = dependency.resource_group.outputs                  │
+│                .resource_group_location           ← Gets location│
+│    resource_group_name = dependency.resource_group.outputs       │
+│                           .resource_group_name    ← Gets RG name │
+│    sku_name       = "Basic"                                      │
+│    identity_type  = "SystemAssigned"                             │
+│    tags           = local.env_vars.locals.tags                   │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+DEV RUNBOOK CONFIG (shows TWO dependencies):
+
+FILE: environments/dev/runbook/terragrunt.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  include "root" {                                                │
+│    path = find_in_parent_folders()                               │
+│  }                                                               │
+│                                                                  │
+│  locals {                                                        │
+│    env_vars = read_terragrunt_config(                            │
+│      find_in_parent_folders("env.hcl")                           │
+│    )                                                             │
+│  }                                                               │
+│                                                                  │
+│  terraform {                                                     │
+│    source = "../../../modules/runbook"                           │
+│  }                                                               │
+│                                                                  │
+│  dependency "resource_group" {                                   │
+│    config_path = "../resource-group"                             │
+│    mock_outputs = {                                              │
+│      resource_group_name     = "mock-rg"                         │
+│      resource_group_location = "eastus"                          │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  dependency "automation_account" {              ← 2nd dependency │
+│    config_path = "../automation-account"                         │
+│    mock_outputs = {                                              │
+│      automation_account_name = "mock-automation"                 │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  inputs = {                                                      │
+│    runbook_name = "Get-ServicesScript"                            │
+│    location     = dependency.resource_group.outputs              │
+│                     .resource_group_location                     │
+│    resource_group_name = dependency.resource_group.outputs       │
+│                           .resource_group_name                   │
+│    automation_account_name = dependency.automation_account       │
+│                               .outputs.automation_account_name   │
+│    runbook_type = "PowerShell"                                   │
+│    log_verbose  = false                                          │
+│    log_progress = false                                          │
+│    description  = null                                           │
+│    tags         = local.env_vars.locals.tags                     │
+│                                                                  │
+│    runbook_content = <<-EOT                                      │
+│      $svc = Get-Services                                         │
+│      Write-Output $svc                                           │
+│    EOT                                                           │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+
+QA AND PROD — SAME PATTERN, DIFFERENT NAMES:
+
+For QA, just change the names:
+  resource_group_name      = "MyResources-QA"
+  automation_account_name  = "QA-AutomateProcess"
+  runbook_name             = "QA-Get-ServicesScript"
+  logic_app_name           = "QA-LA"
+  managed_identity_name    = "QA-MI"
+
+For Prod:
+  resource_group_name      = "MyResources-Prod"
+  automation_account_name  = "Prod-AutomateProcess"
+  runbook_name             = "Prod-Get-ServicesScript"
+  logic_app_name           = "Prod-LA"
+  managed_identity_name    = "Prod-MI"
+
+*** CRITICAL FOR AUTOMATION ACCOUNT (Single Subscription): ***
+  Azure limit: ONE Automation Account per subscription per region!
+  
+  Since Dev uses "eastus", you MUST use different regions:
+  - QA automation-account:   location = "eastus2"      (NOT from dependency!)
+  - QA runbook:              location = "eastus2"      (MUST match its automation account)
+  - Prod automation-account: location = "westus"
+  - Prod runbook:            location = "westus"
+  
+  All other resources (RG, MI, Logic App) can stay in "eastus".
+  
+  Allowed regions (depends on subscription type):
+  Free Trial: eastus, eastus2, westus, northeurope, southeastasia, japanwest
+  Pay-As-You-Go: More regions available
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.11  STEP 8: CREATE THE GITHUB ACTIONS PIPELINES
+────────────────────────────────────────────────────────────────────────────────────────
+
+We create 3 pipelines:
+  1. Plan  — Shows what WOULD change (safe, read-only)
+  2. Apply — Actually creates/updates resources
+  3. Destroy — Tears everything down (requires typing "DESTROY" to confirm)
+
+
+PIPELINE 1: PLAN
+
+FILE: .github/workflows/terragrunt-plan.yml
+┌──────────────────────────────────────────────────────────────────┐
+│  name: "Terragrunt Plan"                                         │
+│                                                                  │
+│  on:                                                             │
+│    pull_request:                                                 │
+│      branches: [main]                                            │
+│      paths: ['modules/**', 'environments/**']                    │
+│                                                                  │
+│    workflow_dispatch:                        # Manual trigger     │
+│      inputs:                                                     │
+│        environment:                                              │
+│          description: "Which environment to plan?"               │
+│          required: true                                          │
+│          type: choice                                            │
+│          options:                                                │
+│            - dev                                                 │
+│            - qa                                                  │
+│            - prod                                                │
+│                                                                  │
+│  permissions:                                                    │
+│    id-token: write        # REQUIRED for OIDC!                   │
+│    contents: read                                                │
+│    pull-requests: write                                          │
+│                                                                  │
+│  jobs:                                                           │
+│    plan:                                                         │
+│      name: "Plan - ${{ github.event.inputs.environment || 'dev'  │
+│             }}"                                                  │
+│      runs-on: ubuntu-latest                                      │
+│                                                                  │
+│      defaults:                                                   │
+│        run:                                                      │
+│          working-directory: environments/${{ github.event.inputs │
+│                              .environment || 'dev' }}            │
+│                                                                  │
+│      env:                                    # SECRETS → ENV VARS│
+│        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}             │
+│        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }} │
+│        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}             │
+│        ARM_USE_OIDC: "true"                                      │
+│                                                                  │
+│      steps:                                                      │
+│        - name: "Checkout Code"                                   │
+│          uses: actions/checkout@v4                                │
+│                                                                  │
+│        - name: "Setup Terraform"                                 │
+│          uses: hashicorp/setup-terraform@v3                      │
+│          with:                                                   │
+│            terraform_version: "1.7.0"                             │
+│            terraform_wrapper: false                               │
+│                                                                  │
+│        - name: "Setup Terragrunt"                                │
+│          uses: autero1/action-terragrunt@v3                      │
+│          with:                                                   │
+│            terragrunt-version: "0.68.9"                           │
+│                                                                  │
+│        - name: "Terragrunt Init"                                 │
+│          run: terragrunt run-all init                            │
+│               --terragrunt-non-interactive                        │
+│                                                                  │
+│        - name: "Terragrunt Validate"                             │
+│          run: terragrunt run-all validate                        │
+│               --terragrunt-non-interactive                        │
+│                                                                  │
+│        - name: "Terragrunt Plan"                                 │
+│          run: terragrunt run-all plan                            │
+│               --terragrunt-non-interactive                        │
+└──────────────────────────────────────────────────────────────────┘
+
+
+PIPELINE 2: APPLY
+
+FILE: .github/workflows/terragrunt-apply.yml
+┌──────────────────────────────────────────────────────────────────┐
+│  name: "Terragrunt Apply"                                        │
+│                                                                  │
+│  on:                                                             │
+│    workflow_dispatch:                        # Manual only!       │
+│      inputs:                                                     │
+│        environment:                                              │
+│          description: "Which environment to apply?"              │
+│          required: true                                          │
+│          type: choice                                            │
+│          options: [dev, qa, prod]                                 │
+│                                                                  │
+│  permissions:                                                    │
+│    id-token: write                                               │
+│    contents: read                                                │
+│                                                                  │
+│  jobs:                                                           │
+│    apply:                                                        │
+│      name: "Apply - ${{ github.event.inputs.environment }}"      │
+│      runs-on: ubuntu-latest                                      │
+│      defaults:                                                   │
+│        run:                                                      │
+│          working-directory: environments/${{ github.event.inputs │
+│                              .environment }}                     │
+│      env:                                                        │
+│        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}             │
+│        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }} │
+│        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}             │
+│        ARM_USE_OIDC: "true"                                      │
+│                                                                  │
+│      steps:                                                      │
+│        - uses: actions/checkout@v4                                │
+│        - uses: hashicorp/setup-terraform@v3                      │
+│          with:                                                   │
+│            terraform_version: "1.7.0"                             │
+│            terraform_wrapper: false                               │
+│        - uses: autero1/action-terragrunt@v3                      │
+│          with:                                                   │
+│            terragrunt-version: "0.68.9"                           │
+│        - run: terragrunt run-all init                            │
+│               --terragrunt-non-interactive                        │
+│        - run: terragrunt run-all apply                           │
+│               --terragrunt-non-interactive                        │
+└──────────────────────────────────────────────────────────────────┘
+
+
+PIPELINE 3: DESTROY
+
+FILE: .github/workflows/terragrunt-destroy.yml
+┌──────────────────────────────────────────────────────────────────┐
+│  name: "Terragrunt Destroy"                                      │
+│                                                                  │
+│  on:                                                             │
+│    workflow_dispatch:                                             │
+│      inputs:                                                     │
+│        environment:                                              │
+│          description: "Which environment to destroy?"            │
+│          required: true                                          │
+│          type: choice                                            │
+│          options: [dev, qa, prod]                                 │
+│        confirm:                                                  │
+│          description: "Type DESTROY to confirm"                  │
+│          required: true                                          │
+│          type: string                                            │
+│                                                                  │
+│  permissions:                                                    │
+│    id-token: write                                               │
+│    contents: read                                                │
+│                                                                  │
+│  jobs:                                                           │
+│    destroy:                                                      │
+│      runs-on: ubuntu-latest                                      │
+│      if: github.event.inputs.confirm == 'DESTROY'  # SAFETY!    │
+│      defaults:                                                   │
+│        run:                                                      │
+│          working-directory: environments/${{ github.event.inputs │
+│                              .environment }}                     │
+│      env:                                                        │
+│        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}             │
+│        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }} │
+│        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}             │
+│        ARM_USE_OIDC: "true"                                      │
+│                                                                  │
+│      steps:                                                      │
+│        - uses: actions/checkout@v4                                │
+│        - uses: hashicorp/setup-terraform@v3                      │
+│          with: { terraform_version: "1.7.0",                     │
+│                  terraform_wrapper: false }                       │
+│        - uses: autero1/action-terragrunt@v3                      │
+│          with: { terragrunt-version: "0.68.9" }                  │
+│        - run: terragrunt run-all init                            │
+│               --terragrunt-non-interactive                        │
+│        - run: terragrunt run-all destroy                         │
+│               --terragrunt-non-interactive                        │
+└──────────────────────────────────────────────────────────────────┘
+
+*** CRITICAL: Do NOT add "environment:" under the job definition! ***
+  If you add "environment: dev", GitHub will look for secrets INSIDE a GitHub 
+  Environment called "dev" — NOT at the repository level. This is the #1 mistake!
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.12  STEP 9: CREATE THE GITHUB REPOSITORY AND PUSH CODE
+────────────────────────────────────────────────────────────────────────────────────────
+
+FIRST, create a .gitignore file:
+
+FILE: .gitignore
+┌──────────────────────────────────────────────────────────────────┐
+│  .terragrunt-cache/                                              │
+│  .terraform/                                                     │
+│  .terraform.lock.hcl                                             │
+│  *.tfstate                                                       │
+│  *.tfstate.backup                                                │
+│  *.tfplan                                                        │
+│  backend.tf                                                      │
+│  provider.tf                                                     │
+│  crash.log                                                       │
+└──────────────────────────────────────────────────────────────────┘
+
+THEN, create the repo and push:
+
+  # Create repo on GitHub (using GitHub CLI)
+  gh repo create YOUR-USERNAME/Terragrunt-Azure-Replication --public --source=. --remote=origin --push
+
+  # OR manually:
+  git add -A
+  git commit -m "initial: complete terragrunt setup"
+  git remote add origin https://github.com/YOUR-USERNAME/Terragrunt-Azure-Replication.git
+  git push -u origin main
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.13  STEP 10: SET UP OIDC FEDERATED CREDENTIALS IN AZURE
+────────────────────────────────────────────────────────────────────────────────────────
+
+THIS IS THE MOST IMPORTANT STEP! Without this, GitHub cannot authenticate to Azure.
+
+WHAT ARE FEDERATED CREDENTIALS?
+  They're like a trust agreement: "Azure, please trust tokens coming from GitHub 
+  Actions when they say they're running for my specific repository."
+
+YOU NEED TWO CREDENTIALS:
+
+  1. For pushes/manual triggers (workflow_dispatch from main branch):
+
+     az ad app federated-credential create --id <YOUR_APP_ID> --parameters '{
+       "name": "github-actions-main",
+       "issuer": "https://token.actions.githubusercontent.com",
+       "subject": "repo:YOUR-USERNAME/Terragrunt-Azure-Replication:ref:refs/heads/main",
+       "audiences": ["api://AzureADTokenExchange"]
+     }'
+
+  2. For pull requests:
+
+     az ad app federated-credential create --id <YOUR_APP_ID> --parameters '{
+       "name": "github-actions-pr",
+       "issuer": "https://token.actions.githubusercontent.com",
+       "subject": "repo:YOUR-USERNAME/Terragrunt-Azure-Replication:pull_request",
+       "audiences": ["api://AzureADTokenExchange"]
+     }'
+
+  Replace YOUR-USERNAME and YOUR_APP_ID!
+
+VERIFY:
+  az ad app federated-credential list --id <YOUR_APP_ID> -o table
+
+  You should see 2 entries.
+
+*** COMMON MISTAKE: ***
+  The "subject" must EXACTLY match what GitHub sends:
+  - For branches:      repo:OWNER/REPO:ref:refs/heads/BRANCH
+  - For pull requests: repo:OWNER/REPO:pull_request
+  - For environments:  repo:OWNER/REPO:environment:ENV_NAME
+  
+  If using "environment:" in your workflow, use the environment subject.
+  If NOT using "environment:" (our approach), use the branch/PR subjects.
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.14  STEP 11: SET GITHUB SECRETS
+────────────────────────────────────────────────────────────────────────────────────────
+
+Add these 3 secrets to your GitHub repository:
+
+  METHOD 1: Using GitHub CLI (easiest)
+  
+    gh secret set AZURE_CLIENT_ID --repo YOUR-USERNAME/Terragrunt-Azure-Replication --body "<YOUR_APP_ID>"
+    gh secret set AZURE_SUBSCRIPTION_ID --repo YOUR-USERNAME/Terragrunt-Azure-Replication --body "<YOUR_SUBSCRIPTION_ID>"
+    gh secret set AZURE_TENANT_ID --repo YOUR-USERNAME/Terragrunt-Azure-Replication --body "<YOUR_TENANT_ID>"
+
+  METHOD 2: Via GitHub UI
+  
+    1. Go to: https://github.com/YOUR-USERNAME/Terragrunt-Azure-Replication/settings/secrets/actions
+    2. Click "New repository secret"
+    3. Add each secret:
+       Name: AZURE_CLIENT_ID        Value: <your app id>
+       Name: AZURE_SUBSCRIPTION_ID  Value: <your subscription id>
+       Name: AZURE_TENANT_ID        Value: <your tenant id>
+
+VERIFY:
+  gh secret list --repo YOUR-USERNAME/Terragrunt-Azure-Replication
+
+  Expected:
+    NAME                   UPDATED
+    AZURE_CLIENT_ID        less than a minute ago
+    AZURE_SUBSCRIPTION_ID  less than a minute ago
+    AZURE_TENANT_ID        less than a minute ago
+
+*** IMPORTANT: These are REPOSITORY-level secrets, NOT environment-level secrets! ***
+  That's why we don't use "environment:" in our workflow jobs.
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.15  STEP 12: IMPORT EXISTING DEV RESOURCES INTO TERRAFORM STATE
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT IS IMPORTING?
+  Your Dev resources already exist in Azure. Terraform doesn't know about them yet.
+  "Import" tells Terraform: "Hey, THIS Azure resource is managed by THIS config."
+  After importing, Terraform won't try to create them again — it'll just manage them.
+
+BEFORE YOU IMPORT:
+  You must be logged into Azure CLI:
+    az login
+    az account set --subscription <YOUR_SUBSCRIPTION_ID>
+
+  You must set environment variables for OIDC (for local runs):
+    # PowerShell:
+    $env:ARM_CLIENT_ID = "<YOUR_APP_ID>"
+    $env:ARM_SUBSCRIPTION_ID = "<YOUR_SUBSCRIPTION_ID>"
+    $env:ARM_TENANT_ID = "<YOUR_TENANT_ID>"
+    $env:ARM_USE_OIDC = "true"
+    
+    # OR for local dev, you can skip OIDC and just use Azure CLI auth by 
+    # temporarily changing provider to NOT use OIDC. But for CI/CD it must use OIDC.
+
+IMPORT COMMANDS (run from each resource's directory):
+
+  1. RESOURCE GROUP:
+     cd environments/dev/resource-group
+     terragrunt import azurerm_resource_group.this /subscriptions/<SUB_ID>/resourceGroups/MyResources-Dev
+
+  2. MANAGED IDENTITY:
+     cd environments/dev/managed-identity
+     terragrunt import azurerm_user_assigned_identity.this /subscriptions/<SUB_ID>/resourceGroups/MyResources-Dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/Dev-MI
+
+     *** NOTE: "resourceGroups" must have capital G! Azure CLI sometimes shows lowercase. ***
+
+  3. AUTOMATION ACCOUNT:
+     cd environments/dev/automation-account
+     terragrunt import azurerm_automation_account.this /subscriptions/<SUB_ID>/resourceGroups/MyResources-Dev/providers/Microsoft.Automation/automationAccounts/AutomateProcess
+
+  4. RUNBOOK:
+     cd environments/dev/runbook
+     terragrunt import azurerm_automation_runbook.this /subscriptions/<SUB_ID>/resourceGroups/MyResources-Dev/providers/Microsoft.Automation/automationAccounts/AutomateProcess/runbooks/Get-ServicesScript
+
+  5. LOGIC APP:
+     cd environments/dev/logic-app
+     terragrunt import azurerm_logic_app_workflow.this /subscriptions/<SUB_ID>/resourceGroups/MyResources-Dev/providers/Microsoft.Logic/workflows/DevLA
+
+VERIFY THE IMPORT (CRITICAL STEP!):
+  Go back to the environment root and run plan:
+  
+  cd environments/dev
+  terragrunt run-all plan --terragrunt-non-interactive
+
+  *** THE OUTPUT MUST SAY: "No changes. Your infrastructure matches the configuration." ***
+  
+  If it shows changes, your config doesn't match reality. Common fixes:
+  - Tags are wrong (existing has none → use tags = {})
+  - Description is wrong (existing has null → use description = null, not "")
+  - Runbook content doesn't match (whitespace matters!)
+  - Location casing (use lowercase: "eastus" not "EastUS")
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.16  STEP 13: DEPLOY QA AND PROD VIA GITHUB ACTIONS
+────────────────────────────────────────────────────────────────────────────────────────
+
+Now the exciting part! Everything is set up. Let's deploy!
+
+  STEP 1: RUN PLAN FIRST (always!)
+    1. Go to: GitHub → Your repo → Actions → "Terragrunt Plan"
+    2. Click "Run workflow"
+    3. Select environment: "qa"
+    4. Click "Run workflow"
+    5. Wait for it to complete (green ✓)
+    6. Review the plan output — make sure it shows creating the right resources
+
+  STEP 2: RUN APPLY
+    1. Go to: Actions → "Terragrunt Apply"
+    2. Click "Run workflow"
+    3. Select environment: "qa"
+    4. Click "Run workflow"
+    5. Wait for it to complete (green ✓)
+
+  STEP 3: REPEAT FOR PROD
+    Same as above but select "prod"
+
+  OR USE THE COMMAND LINE (GitHub CLI):
+    # Plan QA
+    gh workflow run "Terragrunt Plan" -f environment=qa
+    
+    # Apply QA
+    gh workflow run "Terragrunt Apply" -f environment=qa
+    
+    # Plan Prod
+    gh workflow run "Terragrunt Plan" -f environment=prod
+    
+    # Apply Prod
+    gh workflow run "Terragrunt Apply" -f environment=prod
+
+VERIFY IN AZURE:
+  az resource list --resource-group MyResources-QA --query "[].{name:name, type:type}" -o table
+  az resource list --resource-group MyResources-Prod --query "[].{name:name, type:type}" -o table
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.17  COMMON ERRORS AND HOW TO FIX THEM
+────────────────────────────────────────────────────────────────────────────────────────
+
+ERROR 1: "a Tenant ID must be configured when authenticating with OIDC"
+  CAUSE: GitHub secrets are not reaching the workflow.
+  FIX:
+    - Check secrets exist: gh secret list --repo YOUR-USERNAME/YOUR-REPO
+    - Check you DON'T have "environment:" in the job definition
+    - If using "environment:", secrets must be in GitHub Environment settings, 
+      NOT repository settings
+
+ERROR 2: "Only one account is allowed for your subscription per Region"
+  CAUSE: Azure Automation Account limit — 1 per subscription per region
+  FIX: Use different regions per environment:
+    Dev = eastus, QA = eastus2, Prod = westus
+
+ERROR 3: "Free Trial subscriptions cannot create accounts in this location"
+  CAUSE: Your subscription type limits which Azure regions you can use
+  FIX: Use only allowed regions. For Free Trial:
+    eastus, eastus2, westus, northeurope, southeastasia, japanwest
+
+ERROR 4: "OIDC: No matching federated credential found"
+  CAUSE: The federated credential subject doesn't match what GitHub sends
+  FIX: 
+    - If NO "environment:" in workflow → use subject "repo:OWNER/REPO:ref:refs/heads/main"
+    - If "environment: dev" in workflow → use subject "repo:OWNER/REPO:environment:dev"
+    - They CANNOT be mixed!
+
+ERROR 5: Import says "resource already exists in state"
+  CAUSE: You already imported this resource
+  FIX: Skip it, or remove from state first:
+    terragrunt state rm azurerm_resource_group.this
+
+ERROR 6: Plan shows changes after import (description, tags, content mismatch)
+  CAUSE: Your config doesn't exactly match what's in Azure
+  FIX:
+    - Check the actual resource in Azure Portal or via CLI
+    - Match EXACTLY: null vs "" matters, whitespace in runbook content matters
+    - Use: az automation runbook show ... to check actual values
+
+ERROR 7: "Error acquiring the state lock"
+  CAUSE: A previous run crashed and left the state locked
+  FIX: terragrunt force-unlock <LOCK_ID>
+
+ERROR 8: "Backend configuration changed"
+  CAUSE: You changed backend settings after init
+  FIX: terragrunt init -reconfigure
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+1.18  FINAL RESULT SUMMARY
+────────────────────────────────────────────────────────────────────────────────────────
+
+WHAT WE ACHIEVED:
+
+  ✅ 5 reusable Terraform modules (Resource Group, MI, Automation Account, Runbook, Logic App)
+  ✅ 3 environments (Dev, QA, Prod) with isolated state files
+  ✅ Existing Dev resources imported (no recreation)
+  ✅ QA and Prod created automatically via CI/CD
+  ✅ OIDC authentication (zero passwords stored anywhere)
+  ✅ GitHub Actions pipelines (Plan, Apply, Destroy)
+  ✅ State stored securely in Azure Storage Account
+
+  Total Azure resources managed: 15 (5 per environment × 3 environments)
+
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════
+                                                                                    
+     PPPP   AAAA  RRRR  TTTTT     2222                                             
+     P   P A    A R   R   T      2    2                                            
+     PPPP  AAAAAA RRRR    T          2                                             
+     P     A    A R  R    T        2                                               
+     P     A    A R   R   T      222222                                            
+                                                                                    
+     MULTIPLE SUBSCRIPTIONS SETUP                                                   
+     (Separate Azure subscription for each environment)                             
+                                                                                    
+════════════════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════════════════
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.1  WHAT CHANGES WITH MULTIPLE SUBSCRIPTIONS?
+────────────────────────────────────────────────────────────────────────────────────────
+
+In the real world, most organizations use SEPARATE Azure subscriptions per environment:
+
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  SINGLE SUBSCRIPTION (Part 1)        MULTIPLE SUBSCRIPTIONS       │
+  │  ─────────────────────               ──────────────────────       │
+  │                                                                    │
+  │  Subscription: SUB-123               Dev Sub:  SUB-DEV-111       │
+  │  ├── MyResources-Dev                 ├── MyResources-Dev          │
+  │  ├── MyResources-QA                                               │
+  │  └── MyResources-Prod               QA Sub:   SUB-QA-222        │
+  │                                      ├── MyResources-QA           │
+  │  (All in one sub,                                                 │
+  │   separated by RG name)              Prod Sub: SUB-PROD-333     │
+  │                                      ├── MyResources-Prod         │
+  │                                                                    │
+  │                                      (Each env in its own sub)    │
+  └────────────────────────────────────────────────────────────────────┘
+
+KEY DIFFERENCES:
+  ┌──────────────────────┬───────────────────────┬───────────────────────┐
+  │  What Changes        │  Single Sub           │  Multiple Subs        │
+  ├──────────────────────┼───────────────────────┼───────────────────────┤
+  │  Subscription IDs    │  1 (same everywhere)  │  3 (one per env)      │
+  │  GitHub Secrets      │  3 repo-level         │  3 per env OR dynamic │
+  │  Provider config     │  No sub ID needed     │  Needs subscription_id│
+  │  State storage       │  1 storage account    │  1 or 3 (your choice) │
+  │  Service Principal   │  1 (Contributor on 1) │  1 or 3 (roles on 3)  │
+  │  OIDC credentials    │  2 (main + PR)        │  2 (same if 1 SP)     │
+  │  Automation Account  │  Different regions!   │  Same region OK!      │
+  │  Folder structure    │  Same                 │  Same                 │
+  │  Modules             │  Same                 │  Same                 │
+  └──────────────────────┴───────────────────────┴───────────────────────┘
+
+  BIG ADVANTAGE: With separate subscriptions, you CAN use the same region 
+  ("eastus") for Automation Accounts in all environments! The 1-per-sub-per-region 
+  limit applies per SUBSCRIPTION, not globally.
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.2  PREREQUISITES FOR MULTI-SUBSCRIPTION
+────────────────────────────────────────────────────────────────────────────────────────
+
+Same as Part 1, PLUS:
+
+  ✦ 3 Azure Subscriptions (note down ALL their IDs):
+    - Dev:  e.g., aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa
+    - QA:   e.g., bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb
+    - Prod: e.g., cccccccc-3333-3333-3333-cccccccccccc
+
+  ✦ All 3 subscriptions must be in the SAME Azure AD Tenant
+    (or you need separate service principals per tenant)
+
+FIND YOUR SUBSCRIPTION IDs:
+  az account list --query "[].{name:name, id:id, tenantId:tenantId}" -o table
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.3  AZURE SETUP DIFFERENCES
+────────────────────────────────────────────────────────────────────────────────────────
+
+OPTION A: ONE SERVICE PRINCIPAL WITH ACCESS TO ALL SUBSCRIPTIONS (SIMPLEST)
+  
+  This is the easiest approach. One app registration, one SP, roles on all 3 subs.
+  
+  # Step 1: Create the app (same as Part 1)
+  az ad app create --display-name "github-actions-terragrunt-multisub"
+  az ad sp create --id <APP_ID>
+  
+  # Step 2: Give Contributor role on ALL 3 subscriptions
+  az role assignment create --assignee <APP_ID> --role "Contributor" --scope "/subscriptions/<DEV_SUB_ID>"
+  az role assignment create --assignee <APP_ID> --role "Contributor" --scope "/subscriptions/<QA_SUB_ID>"
+  az role assignment create --assignee <APP_ID> --role "Contributor" --scope "/subscriptions/<PROD_SUB_ID>"
+
+  # Step 3: State storage — create in ONE subscription (e.g., Dev) or a shared "management" sub
+  # Same as Part 1, but give access from all subs
+  az role assignment create --assignee <APP_ID> --role "Storage Blob Data Contributor" --scope <STORAGE_ACCOUNT_ID>
+
+OPTION B: SEPARATE SERVICE PRINCIPAL PER SUBSCRIPTION (MORE SECURE)
+  
+  Each environment gets its own SP with access to ONLY its subscription.
+  More secure but more complex to manage.
+  
+  # Create 3 apps:
+  az ad app create --display-name "github-terragrunt-dev"
+  az ad app create --display-name "github-terragrunt-qa"
+  az ad app create --display-name "github-terragrunt-prod"
+  
+  # Create SPs for each:
+  az ad sp create --id <DEV_APP_ID>
+  az ad sp create --id <QA_APP_ID>
+  az ad sp create --id <PROD_APP_ID>
+  
+  # Assign roles (each to its OWN subscription only):
+  az role assignment create --assignee <DEV_APP_ID> --role "Contributor" --scope "/subscriptions/<DEV_SUB_ID>"
+  az role assignment create --assignee <QA_APP_ID> --role "Contributor" --scope "/subscriptions/<QA_SUB_ID>"
+  az role assignment create --assignee <PROD_APP_ID> --role "Contributor" --scope "/subscriptions/<PROD_SUB_ID>"
+  
+  # All 3 SPs need access to state storage:
+  az role assignment create --assignee <DEV_APP_ID> --role "Storage Blob Data Contributor" --scope <STORAGE_ID>
+  az role assignment create --assignee <QA_APP_ID> --role "Storage Blob Data Contributor" --scope <STORAGE_ID>
+  az role assignment create --assignee <PROD_APP_ID> --role "Storage Blob Data Contributor" --scope <STORAGE_ID>
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.4  FOLDER STRUCTURE DIFFERENCES
+────────────────────────────────────────────────────────────────────────────────────────
+
+*** THE FOLDER STRUCTURE IS EXACTLY THE SAME AS PART 1! ***
+
+  The only differences are INSIDE the config files (different subscription IDs, 
+  possibly different client IDs if using Option B).
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.5  ROOT TERRAGRUNT CONFIG CHANGES
+────────────────────────────────────────────────────────────────────────────────────────
+
+The root terragrunt.hcl needs to pass the subscription_id to the provider.
+
+OPTION A (One SP, different subs via env.hcl):
+
+FILE: environments/dev/terragrunt.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment = "dev"                                           │
+│    env_vars = read_terragrunt_config("env.hcl")                  │
+│  }                                                               │
+│                                                                  │
+│  remote_state {                                                  │
+│    backend = "azurerm"                                           │
+│    config = {                                                    │
+│      resource_group_name  = "terraform-state-rg"                 │
+│      storage_account_name = "tfstatemultisub01"                  │
+│      container_name       = "tfstate"                            │
+│      key = "${local.environment}/${path_relative_to_include()}/  │
+│             terraform.tfstate"                                   │
+│      subscription_id = "STORAGE-ACCOUNT-SUB-ID"  ← Sub where    │
+│                                                    state lives!  │
+│      use_oidc        = true                                      │
+│      client_id       = get_env("ARM_CLIENT_ID", "")             │
+│      tenant_id       = get_env("ARM_TENANT_ID", "")             │
+│    }                                                             │
+│    generate = {                                                  │
+│      path      = "backend.tf"                                   │
+│      if_exists = "overwrite_terragrunt"                          │
+│    }                                                             │
+│  }                                                               │
+│                                                                  │
+│  generate "provider" {                                           │
+│    path      = "provider.tf"                                     │
+│    if_exists = "overwrite_terragrunt"                            │
+│    contents  = <<EOF                                             │
+│  provider "azurerm" {                                            │
+│    features {}                                                   │
+│    use_oidc        = true                                        │
+│    subscription_id = "${local.env_vars.locals.subscription_id}"  │ ← KEY CHANGE!
+│  }                                                               │  Sets which sub
+│  EOF                                                             │  to deploy to
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+  *** KEY CHANGE: subscription_id in the provider block! ***
+  This tells Terraform WHICH subscription to create resources in.
+  In Part 1 (single sub), this wasn't needed because there's only one.
+
+OPTION B (Separate SPs per env):
+
+  Same as above, but the client_id also comes from env.hcl:
+  
+  In the remote_state config:
+    client_id = local.env_vars.locals.client_id     ← Different per env!
+  
+  In the provider:
+    subscription_id = "${local.env_vars.locals.subscription_id}"
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.6  ENVIRONMENT VARIABLE FILE CHANGES
+────────────────────────────────────────────────────────────────────────────────────────
+
+Each env.hcl now includes the subscription_id:
+
+FILE: environments/dev/env.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment     = "dev"                                       │
+│    subscription_id = "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"      │ ← Dev sub
+│    location        = "eastus"                                    │
+│    tags            = {}                                          │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: environments/qa/env.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment     = "qa"                                        │
+│    subscription_id = "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"      │ ← QA sub
+│    location        = "eastus"     ← Can use same region now!     │
+│    tags = {                                                      │
+│      environment = "qa"                                          │
+│      managed_by  = "terragrunt"                                  │
+│    }                                                             │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+FILE: environments/prod/env.hcl
+┌──────────────────────────────────────────────────────────────────┐
+│  locals {                                                        │
+│    environment     = "prod"                                      │
+│    subscription_id = "cccccccc-3333-3333-3333-cccccccccccc"      │ ← Prod sub
+│    location        = "eastus"     ← Can use same region now!     │
+│    tags = {                                                      │
+│      environment = "prod"                                        │
+│      managed_by  = "terragrunt"                                  │
+│      criticality = "high"                                        │
+│    }                                                             │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+
+  FOR OPTION B (Separate SPs), also add:
+    client_id = "<THAT_ENV's_APP_ID>"
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.7  GITHUB SECRETS CHANGES
+────────────────────────────────────────────────────────────────────────────────────────
+
+OPTION A (One SP, all subs):
+  SAME as Part 1 — 3 repository-level secrets:
+    AZURE_CLIENT_ID        = <single app id>
+    AZURE_SUBSCRIPTION_ID  = <not used in provider, but needed for state backend>
+    AZURE_TENANT_ID        = <your tenant id>
+
+  Wait — but which subscription_id goes in the secret?
+  Answer: The subscription where your STATE STORAGE lives.
+  The deployment subscription comes from env.hcl (baked into the provider block).
+
+OPTION B (Separate SPs per env):
+  You have TWO CHOICES:
+
+  CHOICE 1: Use GitHub Environments (more secure, recommended for Option B):
+  
+    Create 3 GitHub Environments: dev, qa, prod
+    (Repo → Settings → Environments → New environment)
+    
+    In EACH environment, add these secrets:
+      AZURE_CLIENT_ID        = <that env's app id>
+      AZURE_SUBSCRIPTION_ID  = <that env's subscription id>
+      AZURE_TENANT_ID        = <tenant id>
+    
+    AND add "environment:" back to the workflow:
+      jobs:
+        apply:
+          environment: ${{ github.event.inputs.environment }}  ← ADD THIS BACK!
+
+    AND create federated credentials with environment subjects:
+      subject: "repo:OWNER/REPO:environment:dev"
+      subject: "repo:OWNER/REPO:environment:qa"
+      subject: "repo:OWNER/REPO:environment:prod"
+
+  CHOICE 2: Use environment-specific secret names (simpler):
+  
+    Set 9 repository-level secrets (3 per env):
+      AZURE_CLIENT_ID_DEV          AZURE_CLIENT_ID_QA          AZURE_CLIENT_ID_PROD
+      AZURE_SUBSCRIPTION_ID_DEV    AZURE_SUBSCRIPTION_ID_QA    AZURE_SUBSCRIPTION_ID_PROD
+      AZURE_TENANT_ID_DEV          AZURE_TENANT_ID_QA          AZURE_TENANT_ID_PROD
+    
+    Then in the workflow, map them dynamically (see Section 2.9).
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.8  OIDC FEDERATED CREDENTIALS CHANGES
+────────────────────────────────────────────────────────────────────────────────────────
+
+OPTION A (One SP):
+  SAME as Part 1 — 2 federated credentials (main branch + PR).
+  Because it's the same app, the same credentials work for all environments.
+
+OPTION B (Separate SPs per env) — Using GitHub Environments:
+  Create 2 credentials PER APP (6 total):
+
+  For Dev SP:
+    az ad app federated-credential create --id <DEV_APP_ID> --parameters '{
+      "name": "github-env-dev",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:YOUR-USER/YOUR-REPO:environment:dev",
+      "audiences": ["api://AzureADTokenExchange"]
+    }'
+
+  For QA SP:
+    az ad app federated-credential create --id <QA_APP_ID> --parameters '{
+      "name": "github-env-qa",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:YOUR-USER/YOUR-REPO:environment:qa",
+      "audiences": ["api://AzureADTokenExchange"]
+    }'
+
+  For Prod SP:
+    az ad app federated-credential create --id <PROD_APP_ID> --parameters '{
+      "name": "github-env-prod",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:YOUR-USER/YOUR-REPO:environment:prod",
+      "audiences": ["api://AzureADTokenExchange"]
+    }'
+
+  (Add PR credentials too if needed)
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.9  GITHUB ACTIONS WORKFLOW CHANGES
+────────────────────────────────────────────────────────────────────────────────────────
+
+OPTION A (One SP, subscription in env.hcl):
+  *** EXACTLY THE SAME AS PART 1! ***
+  No changes needed. The subscription_id is baked into the provider.tf 
+  generated by terragrunt.hcl, which reads from env.hcl.
+
+OPTION B WITH GITHUB ENVIRONMENTS:
+  Add "environment:" back to the workflow:
+
+  jobs:
+    apply:
+      environment: ${{ github.event.inputs.environment }}  ← ADD THIS
+      runs-on: ubuntu-latest
+      env:
+        ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ARM_USE_OIDC: "true"
+
+  GitHub will automatically pick up secrets from the matching environment.
+
+OPTION B WITH ENVIRONMENT-SPECIFIC SECRET NAMES:
+  More complex but no GitHub Environments needed:
+
+  jobs:
+    apply:
+      runs-on: ubuntu-latest
+      env:
+        ARM_CLIENT_ID: ${{ 
+          github.event.inputs.environment == 'dev' && secrets.AZURE_CLIENT_ID_DEV ||
+          github.event.inputs.environment == 'qa' && secrets.AZURE_CLIENT_ID_QA ||
+          secrets.AZURE_CLIENT_ID_PROD 
+        }}
+        ARM_SUBSCRIPTION_ID: ${{ 
+          github.event.inputs.environment == 'dev' && secrets.AZURE_SUBSCRIPTION_ID_DEV ||
+          github.event.inputs.environment == 'qa' && secrets.AZURE_SUBSCRIPTION_ID_QA ||
+          secrets.AZURE_SUBSCRIPTION_ID_PROD 
+        }}
+        ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}  # Usually same across all
+        ARM_USE_OIDC: "true"
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.10  COMPLETE MULTI-SUBSCRIPTION EXAMPLE (OPTION A — RECOMMENDED)
+────────────────────────────────────────────────────────────────────────────────────────
+
+Let's walk through the COMPLETE setup for Option A (one SP, multi-sub).
+
+GIVEN:
+  Dev Subscription:  aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa
+  QA Subscription:   bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb
+  Prod Subscription: cccccccc-3333-3333-3333-cccccccccccc
+  Tenant ID:         dddddddd-4444-4444-4444-dddddddddddd
+  App/Client ID:     eeeeeeee-5555-5555-5555-eeeeeeeeeeee
+  State Storage in Dev subscription
+
+STEP-BY-STEP:
+
+  1. CREATE APP + SP + ROLES (run once):
+     az ad app create --display-name "github-actions-terragrunt-multisub"
+     # Note the appId → eeeeeeee-5555-5555-5555-eeeeeeeeeeee
+     
+     az ad sp create --id eeeeeeee-5555-5555-5555-eeeeeeeeeeee
+     
+     # Give Contributor on ALL 3 subs:
+     az role assignment create --assignee eeeeeeee-5555-5555-5555-eeeeeeeeeeee --role "Contributor" --scope "/subscriptions/aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"
+     az role assignment create --assignee eeeeeeee-5555-5555-5555-eeeeeeeeeeee --role "Contributor" --scope "/subscriptions/bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"
+     az role assignment create --assignee eeeeeeee-5555-5555-5555-eeeeeeeeeeee --role "Contributor" --scope "/subscriptions/cccccccc-3333-3333-3333-cccccccccccc"
+
+  2. CREATE STATE STORAGE (in Dev sub):
+     az account set --subscription aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa
+     az group create --name terraform-state-rg --location eastus
+     az storage account create --name tfstatemultisub01 --resource-group terraform-state-rg --location eastus --sku Standard_LRS
+     az storage container create --name tfstate --account-name tfstatemultisub01
+     
+     # Give SP access to state:
+     STORAGE_ID=$(az storage account show --name tfstatemultisub01 --resource-group terraform-state-rg --query id -o tsv)
+     az role assignment create --assignee eeeeeeee-5555-5555-5555-eeeeeeeeeeee --role "Storage Blob Data Contributor" --scope $STORAGE_ID
+
+  3. FILES — env.hcl (each includes subscription_id):
+     
+     # environments/dev/env.hcl
+     locals {
+       environment     = "dev"
+       subscription_id = "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"
+       location        = "eastus"
+       tags            = {}
+     }
+     
+     # environments/qa/env.hcl
+     locals {
+       environment     = "qa"
+       subscription_id = "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"
+       location        = "eastus"     # CAN be same region now!
+       tags = { environment = "qa", managed_by = "terragrunt" }
+     }
+     
+     # environments/prod/env.hcl
+     locals {
+       environment     = "prod"
+       subscription_id = "cccccccc-3333-3333-3333-cccccccccccc"
+       location        = "eastus"     # CAN be same region now!
+       tags = { environment = "prod", managed_by = "terragrunt", criticality = "high" }
+     }
+
+  4. ROOT TERRAGRUNT.HCL (example for dev — change environment for qa/prod):
+     
+     locals {
+       environment = "dev"
+       env_vars = read_terragrunt_config("env.hcl")
+     }
+     
+     remote_state {
+       backend = "azurerm"
+       config = {
+         resource_group_name  = "terraform-state-rg"
+         storage_account_name = "tfstatemultisub01"
+         container_name       = "tfstate"
+         key                  = "${local.environment}/${path_relative_to_include()}/terraform.tfstate"
+         subscription_id      = "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"   # <-- State sub (always Dev)
+         use_oidc             = true
+         client_id            = get_env("ARM_CLIENT_ID", "")
+         tenant_id            = get_env("ARM_TENANT_ID", "")
+       }
+       generate = {
+         path      = "backend.tf"
+         if_exists = "overwrite_terragrunt"
+       }
+     }
+     
+     generate "provider" {
+       path      = "provider.tf"
+       if_exists = "overwrite_terragrunt"
+       contents  = <<EOF
+     provider "azurerm" {
+       features {}
+       use_oidc        = true
+       subscription_id = "${local.env_vars.locals.subscription_id}"     # <-- Deploy sub (from env.hcl)
+     }
+     EOF
+     }
+
+     *** NOTE THE TWO DIFFERENT SUBSCRIPTION IDs: ***
+     - remote_state.config.subscription_id = Where the STATE file lives (always the same)
+     - provider.subscription_id = Where RESOURCES get created (different per env!)
+
+  5. RESOURCE CONFIGS:
+     *** EXACTLY THE SAME AS PART 1! ***
+     The subscription routing happens in the provider, not in the resource configs.
+     
+     The Automation Account can now use the SAME region everywhere:
+       location = dependency.resource_group.outputs.resource_group_location
+     
+     Because each sub has its own quota for Automation Accounts!
+
+  6. GITHUB SECRETS (3 repo-level):
+     AZURE_CLIENT_ID        = eeeeeeee-5555-5555-5555-eeeeeeeeeeee
+     AZURE_SUBSCRIPTION_ID  = aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa   # <-- State sub
+     AZURE_TENANT_ID        = dddddddd-4444-4444-4444-dddddddddddd
+
+  7. OIDC FEDERATED CREDENTIALS (2):
+     Same as Part 1 — branch + PR subjects.
+
+  8. PIPELINES:
+     *** EXACTLY THE SAME AS PART 1! ***
+
+  9. DEPLOY:
+     Same commands — plan then apply for each environment.
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.11  STATE STORAGE OPTIONS FOR MULTI-SUBSCRIPTION
+────────────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1: ONE CENTRAL STATE STORAGE (RECOMMENDED)
+  
+  Put the state storage in one subscription (e.g., Dev or a dedicated "management" sub).
+  All environments write state to the same storage account, but different keys:
+    dev/resource-group/terraform.tfstate
+    qa/resource-group/terraform.tfstate
+    prod/resource-group/terraform.tfstate
+  
+  Pros: Simple, one place to back up, one place to manage access
+  Cons: If that sub is down, all envs are affected
+
+OPTION 2: SEPARATE STATE STORAGE PER SUBSCRIPTION
+  
+  Each subscription has its own storage account:
+    Dev sub  → tfstatedev01
+    QA sub   → tfstateqa01
+    Prod sub → tfstateprod01
+  
+  Each environment's root terragrunt.hcl points to its own storage:
+    # dev/terragrunt.hcl
+    storage_account_name = "tfstatedev01"
+    subscription_id      = "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"
+    
+    # qa/terragrunt.hcl
+    storage_account_name = "tfstateqa01"
+    subscription_id      = "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"
+  
+  Pros: Complete isolation, more secure
+  Cons: More storage accounts to manage
+
+
+────────────────────────────────────────────────────────────────────────────────────────
+2.12  COMMON ERRORS SPECIFIC TO MULTI-SUBSCRIPTION
+────────────────────────────────────────────────────────────────────────────────────────
+
+ERROR 1: "The subscription '<ID>' could not be found"
+  CAUSE: The service principal doesn't have access to that subscription.
+  FIX: Add the Contributor role on the target subscription:
+    az role assignment create --assignee <APP_ID> --role "Contributor" --scope "/subscriptions/<TARGET_SUB_ID>"
+
+ERROR 2: Resources created in wrong subscription
+  CAUSE: subscription_id not set in the provider block.
+  FIX: Add subscription_id to the generate "provider" block:
+    provider "azurerm" {
+      features {}
+      subscription_id = "${local.env_vars.locals.subscription_id}"
+    }
+
+ERROR 3: State backend can't access storage in a different subscription
+  CAUSE: The remote_state subscription_id doesn't match where the storage account lives.
+  FIX: In remote_state config, set subscription_id to the sub where your storage account is:
+    subscription_id = "STORAGE-ACCOUNT-SUB-ID"  # NOT the deploy sub!
+
+ERROR 4: "AuthorizationFailed" when accessing state
+  CAUSE: SP doesn't have Storage Blob Data Contributor on the state storage.
+  FIX: Assign the role:
+    az role assignment create --assignee <APP_ID> --role "Storage Blob Data Contributor" --scope <STORAGE_ACCOUNT_RESOURCE_ID>
+
+ERROR 5: Mixed up subscription IDs in remote_state vs provider
+  CAUSE: Using the deployment sub ID in remote_state instead of the state-storage sub ID.
+  REMEMBER: 
+    remote_state.config.subscription_id = WHERE STATE LIVES
+    provider.subscription_id            = WHERE RESOURCES GET CREATED
+    These are DIFFERENT in multi-sub!
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+                     QUICK REFERENCE: SIDE-BY-SIDE COMPARISON
+════════════════════════════════════════════════════════════════════════════════════════
+
+┌────────────────────────────┬─────────────────────────┬────────────────────────────────┐
+│  Config / File             │  Single Subscription    │  Multiple Subscriptions        │
+├────────────────────────────┼─────────────────────────┼────────────────────────────────┤
+│                            │                         │                                │
+│  Folder Structure          │  Identical              │  Identical                     │
+│                            │                         │                                │
+│  Modules                   │  Identical              │  Identical                     │
+│                            │                         │                                │
+│  env.hcl                   │  No subscription_id     │  Has subscription_id per env   │
+│                            │                         │                                │
+│  terragrunt.hcl            │  No sub ID in provider  │  subscription_id in provider   │
+│  (root, provider block)    │                         │  from env.hcl                  │
+│                            │                         │                                │
+│  terragrunt.hcl            │  No sub ID needed       │  subscription_id = state sub   │
+│  (root, remote_state)      │  (auto-detected)        │  (explicit)                    │
+│                            │                         │                                │
+│  Resource configs          │  Identical              │  Identical                     │
+│  (per-resource .hcl)       │                         │                                │
+│                            │                         │                                │
+│  Automation Account region │  MUST be different      │  CAN be same region            │
+│                            │  per environment        │  (different subs = no conflict)│
+│                            │                         │                                │
+│  GitHub Secrets            │  3 repo-level           │  3 repo-level (Option A)       │
+│                            │                         │  9 env-level (Option B)        │
+│                            │                         │                                │
+│  OIDC Credentials          │  2 (branch + PR)        │  2 (Option A, same SP)         │
+│                            │                         │  6+ (Option B, per-env SP)     │
+│                            │                         │                                │
+│  Service Principals        │  1 with Contributor     │  1 with Contributor on 3 subs  │
+│                            │  on 1 sub               │  OR 3 SPs (one per sub)        │
+│                            │                         │                                │
+│  Pipelines                 │  Identical              │  Identical (Option A)          │
+│                            │                         │  Need env mapping (Option B)   │
+│                            │                         │                                │
+│  Import process            │  Same                   │  Same (just set correct sub    │
+│                            │                         │  before importing)             │
+└────────────────────────────┴─────────────────────────┴────────────────────────────────┘
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+                          DECISION FLOWCHART
+════════════════════════════════════════════════════════════════════════════════════════
+
+  START
+    │
+    ▼
+  How many Azure subscriptions do you have?
+    │
+    ├── ONE subscription ─────────────► Use Part 1 (Single Sub)
+    │                                    └── Remember: Different regions for
+    │                                        Automation Accounts!
+    │
+    └── MULTIPLE subscriptions ──┐
+                                 │
+                                 ▼
+                          How secure does it need to be?
+                                 │
+                                 ├── Standard security ──► Option A (One SP)
+                                 │                         └── Simplest! Same as Part 1
+                                 │                             but with subscription_id
+                                 │                             in provider block
+                                 │
+                                 └── High security ──────► Option B (Separate SPs)
+                                                           └── More work to set up
+                                                               but each env isolated
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+                             GLOSSARY
+════════════════════════════════════════════════════════════════════════════════════════
+
+  Terraform     = Tool that creates Azure resources from code files
+  Terragrunt    = Wrapper around Terraform that reduces code duplication
+  Module        = Reusable template for an Azure resource
+  State File    = JSON file tracking what Terraform has created
+  Backend       = Where the state file is stored (Azure Storage Account)
+  Provider      = Plugin that talks to Azure (azurerm)
+  OIDC          = Authentication method where GitHub proves its identity to Azure
+  Service Principal = An identity for your app in Azure AD
+  Federated Credential = Trust link between GitHub Actions and Azure AD
+  Import        = Telling Terraform about an existing Azure resource
+  Plan          = Preview of what Terraform would do (safe, read-only)
+  Apply         = Actually execute the changes
+  Destroy       = Delete all managed resources
+  HCL           = HashiCorp Configuration Language (the .tf and .hcl file format)
+  Dependency    = One resource needs another to exist first (e.g., Runbook needs Automation Account)
+  Mock Outputs  = Fake values used during "plan" when the dependency doesn't exist yet
+
+
+════════════════════════════════════════════════════════════════════════════════════════
+                          END OF GUIDE
+════════════════════════════════════════════════════════════════════════════════════════
+
+  If you followed all steps and still have issues:
+  1. Double-check ALL IDs (subscription, tenant, client/app, storage account name)
+  2. Verify federated credential subjects match your workflow setup
+  3. Ensure secrets are at the RIGHT level (repo vs environment)
+  4. Check Azure role assignments: az role assignment list --assignee <APP_ID> -o table
+  5. Check federated credentials: az ad app federated-credential list --id <APP_ID> -o table
+  6. Run plan locally first before trusting the pipeline
+
+  Good luck! 🚀

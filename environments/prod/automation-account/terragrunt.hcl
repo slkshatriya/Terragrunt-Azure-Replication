@@ -24,7 +24,7 @@ dependency "resource_group" {
 
 inputs = {
   automation_account_name = "Prod-AutomateProcess"
-  location                = "westus"  # Must differ from Dev (eastus) & QA (eastus2) — Azure allows only 1 Automation Account per subscription per region
+  location                = "southeastasia"  # Must differ from Dev (eastus) & QA (northeurope) — Azure allows only 1 Automation Account per subscription per region
   resource_group_name     = dependency.resource_group.outputs.resource_group_name
   sku_name                = "Basic"
   identity_type           = "SystemAssigned"
